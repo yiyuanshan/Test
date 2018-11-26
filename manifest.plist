@@ -11,19 +11,19 @@
 					<key>kind</key>
 					<string>software-package</string>
 					<key>url</key>
-					<string>https://gitee.com/yiyuan_shan/fenfa/blob/master/CCTMarketing_iPhone.ipa</string>
+					<string>https://cdn.jsdelivr.net/gh/yiyuanshan/Test/CCTMarketing_iPhone.ipa</string>
 				</dict>
 				<dict>
 					<key>kind</key>
 					<string>display-image</string>
 					<key>url</key>
-					<string>https://gitee.com/yiyuan_shan/fenfa/blob/master/image.57x57.png</string>
+					<string>https://cdn.jsdelivr.net/gh/yiyuanshan/Test/image.57x57.png</string>
 				</dict>
 				<dict>
 					<key>kind</key>
 					<string>full-size-image</string>
 					<key>url</key>
-					<string>https://gitee.com/yiyuan_shan/fenfa/blob/master/image.512x512.png</string>
+					<string>https://cdn.jsdelivr.net/gh/yiyuanshan/Test/image.512x512.png</string>
 				</dict>
 			</array>
 			<key>metadata</key>
