@@ -1,0 +1,788 @@
+# Atlas Logging:
+#  => Atlas.Log.info(arguemnts...)
+#  => Atlas.Log.debug(arguments...)
+#  => Atlas.Log.error(arguments...)
+# Atlas Launch Station Plugin:
+#  => Altas.launch_plugin(bundle, plugin)
+#  => Atlas.launch_plugin(bundle, plugin, name)
+#  => Atlas.launch_plugin(bundle, plugin, name, setup_parameters)
+
+# Atlas Teardown Station Plugin:
+#  => Altas.teardown_plugin(name)
+#  => Altas.teardown_plugin(name, teardown_parameters)
+
+#
+# App Setup:
+# * Called when app first connects to the atlas core and before the station is started
+# * Called when app first connects to the atlas core and before the station is started
+#
+
+def initializeSystemValuables(unit,name) {
+
+
+    Globals.system = {}
+
+    Globals.system.memory = {}
+    Globals.system.stationID = StationInfo.station_id()
+
+
+    Globals.system.simulatorResponsePath  = System.getenv("HOME") + "/Desktop/FakeResponse.json"
+    Globals.system.ghStationPath = "/vault/data_collection/test_station_config/gh_station_info.json"
+
+    Globals.system.appSetupJSON = cformat("%s/Documents/Atlas/AtlasSystemData.json",System.getenv("HOME"))
+    _settingJSON = getAppSettingData(unit,name)
+    Globals.system.stationName = _settingJSON.csvMainTestName onError -> Globals.system.stationName = StationInfo.station_type()
+
+    Globals.system.resourcePath = System.getenv('HOME') + "/Library/Atlas/Resources"
+    Globals.system.sequenceBasePath  =  Globals.system.resourcePath + "/SequenceBase"
+    Globals.system.appSetupCSV = Globals.system.sequenceBasePath+"/StationSetup/"+StationInfo.station_type()+"_Setup.csv"
+    Globals.system.mainPath  =  Globals.system.sequenceBasePath + "/Main/" + StationInfo.station_type() + "_Main.csv"
+    Globals.system.csvRoot  =  Globals.system.sequenceBasePath + "/CSVs"
+    Globals.system.sitePath = Globals.system.sequenceBasePath + "/Main/" + "Site.csv"
+    Globals.system.limitPath = Globals.system.sequenceBasePath  + "/Limits/" + StationInfo.station_type() + "_Limits.csv"
+    Globals.system.rushModules = System.getenv("HOME") + "/Library/Atlas/Sequences/RushModules/"
+
+    Globals.system = Globals.system + _settingJSON
+    Atlas.Log.info(">>>>>>>>>>>>>>>>>>>>>>>>>>>>",JSON.dump(Globals.system),"<<<<<<<<<<<<<<<<<<<<<<<<<<<");
+
+    Atlas.Log.info(System.listenv())
+
+    return Globals.system
+}
+
+# called when app first connects to the atlas core and before the station is started
+app_setup(app)
+{
+    #deletedPreviousLog()
+    Atlas.Log.info("App setup")
+    appSetting ={
+        "fullscreen" : True,
+        "confirmQuit": True,
+        "keepResultsInUI": True,
+        "stopButton": False,
+        "auto_trigger": False,
+        "testMode": Nil,
+        "customTestMode" : Nil,
+        "topology": Nil,
+    }
+    appSetting = appSetting + initializeSystemValuables(app,"app_setup")
+    Atlas.Log.info("app_setup get setting:",appSetting)
+    # auto detect check
+    _topology = Nil
+    if not appSetting.auto_trigger or appSetting.maxLoopCount >1
+    {
+        _topology = appSetting.stationTopology
+    }
+
+    st = appSetting.setTopology onError -> appSetting.setTopology = True
+    app.settings = {
+        "station-name" :  StationInfo.station_type(),
+        "start-button" : choice(appSetting.setTopology == True, _topology, Nil),
+        "station-topology" : choice(appSetting.setTopology == True,_topology,Nil),
+        "force-fullscreen" : appSetting.fullscreen,
+        "confirm-quit" : appSetting.confirmQuit,
+        "stop-button" : appSetting.stopButton,
+        "keep-results-in-UI" : appSetting.keepResultsInUI,
+        "test-modes" : appSetting.testMode,
+        "custom-test-modes" : appSetting.customTestMode
+    }
+    Atlas.Log.info("app.settings",app.settings)
+}
+
+
+# Called when core is starting your station for the first time (app start)
+station_setup()
+{
+    Atlas.Log.info("station setup")
+    Atlas.launch_plugin("OpalQT", "SystemMemory",{})
+
+    # setup unit
+    dicSetting = initializeSystemValuables(Nil,"station_setup")
+    Atlas.Log.info("station_setup get setting:",dicSetting)
+
+    # Lauch plugins in CSV
+    setupByCsv(Nil,"StationSetup")
+
+        #init baudrate
+    if dicSetting.initBaudRate{
+        Atlas.launch_plugin("OpalQT","SerialPort","Init_BaudRate",{})
+        Atlas.call_plugin("Init_BaudRate","initBaudRate",dicSetting)
+    }
+
+    # Load Station setup json file
+    loadStationSetupJSON()
+
+    # Load fake JSON file
+    loadFakeJSON()
+
+    # load gh_station_info.json
+    ghInfoJson = loadGHStationJSON()
+
+    mainData = BasicCSV.load(Globals.system.mainPath)
+    # load Main/Tech/limit CSVs
+    loadCSVs(mainData)
+
+    #repeat check
+    if dicSetting.maxLoopCount > 1
+    {
+        loopTestSetup(dicSetting)
+    }onError e-> if True{}
+
+    # autoDetect
+    if dicSetting.auto_trigger and not dicSetting.maxLoopCount >1{
+        Atlas.launch_plugin("AtlasPluginLibrary", "EFIDutDetection", {"topology": dicSetting.stationTopology})
+    }
+}
+
+# Called when core is tearing down your station (app quit)
+station_teardown()
+{
+  	Atlas.Log.info("Station teardown")
+}
+
+# Called only when core receives new unit.
+unit_setup(unit)
+{
+    Atlas.Log.info(unit,"unit setup")
+    dicSetting = initializeSystemValuables(unit,"unit_setup")
+    Atlas.Log.info("unit_setup get setting:",dicSetting)
+    setupByCsv(unit,"DutSetup")
+
+    if(unit.test_mode_name == "Calibration")
+    {
+      _UNIT_RUSH_SCRIPT = "Calibration.rush"
+    }
+    else
+    {
+      _UNIT_RUSH_SCRIPT = "QT_Sequence.rush"
+    }
+    
+    _parameters = [unit, _UNIT_RUSH_SCRIPT]
+
+    rushSubmodules = System.ls(Globals.system.rushModules)
+    for _modulefileName in rushSubmodules {
+        _parameters = _parameters :: "RushModules/"+_modulefileName
+     }
+    apply(Atlas.set_sequence,_parameters)
+}
+
+# Called when core finsed unit (unit finshed)
+unit_teardown(unit)
+{
+    Atlas.Log.info(unit, "Finished")
+}
+
+
+group_setup(group)
+{
+    Atlas.Log.info("Group Setup")
+    initializeSystemValuables(Nil,"group_setup")
+    setupByCsv(group,"GroupSetup") onError -> dummy = True
+    for unit in group.units {
+        unit_setup(unit)
+    }
+}
+
+group_teardown(group)
+{
+    Atlas.Log.info("Group teardown")
+    for unit in group.units {
+            unit_teardown(unit)
+    }
+}
+
+############ function define for setup station by loading StationSetup.json ###############
+def setupByCsv(unit,testName) {
+    _setupTestItems = loadSetupCSV(testName)
+    executeTestItems(_setupTestItems,unit)
+}
+
+def getAppSettingData(unit,name) {
+    _contents = getFromJSON(Globals.system.appSetupJSON)
+    _dicSetting =  _contents.system
+    _dicSetting.stationTopology = createDutTopologyForStartButton(_dicSetting.topology)
+
+    if name == "app_setup"
+    {
+        _dicSetting = _dicSetting + _contents.app_setup
+
+     }elsif name == "station_setup"{
+        _dicSetting = _dicSetting + _contents.station_setup
+        if _dicSetting.auto_trigger{
+            _dicSetting.stationTopology = createDutTopologyForEFIDutDetection(_dicSetting.topology)
+        }
+
+    }elsif name == "unit_setup"{
+        _dicSetting = _dicSetting + _contents.unit_setup
+    }
+    _contents = updateValueByStationInfo(_dicSetting)
+
+    # _setupTestItems = _contents.excute
+    # executeTestItems(_setupTestItems,unit)
+    return _contents
+}
+
+def loadSetupCSV(testName) {
+
+  _setupInfoArr = []
+
+  _DESIRED_TEST_NAME = testName
+
+  _STATION_SETUP_CSV_FILE_URL = Globals.system.appSetupCSV
+
+  _csvLines = BasicCSV.load(_STATION_SETUP_CSV_FILE_URL)
+
+  for _line in _csvLines[1:] {
+
+    _testItemData = {
+      "testName" : Nil,
+      "testAction" : Nil,
+      "plugin" : Nil,
+      "function" : Nil,
+      "parameters" : Nil,
+      "commands" : Nil,
+      "COF" : Nil
+    }
+
+    _testItemData.testName = _line[0]
+
+    _testItemData.testAction = _line[1]
+
+    _testItemData.parameters = transformValueWithMemoryData(_line[2])
+
+    _testItemData.parameters = JSON_LoadFromString(_testItemData.parameters)
+
+    _testItemData.commands = _line[3]
+    _testItemData.COF = _line[4]
+
+    _tokens = tokenize(_testItemData.testAction,":")
+    _testItemData.plugin = _tokens[0]
+    _testItemData.function = _tokens[1]
+
+    if _testItemData.testName==Nil {
+      _testItemData.testName = _previousTestName
+    }
+    else {
+      _previousTestName = _testItemData.testName
+    }
+
+    if _testItemData.testName==_DESIRED_TEST_NAME {
+      _setupInfoArr = _setupInfoArr :: _testItemData
+    }
+  }
+
+  return _setupInfoArr
+}
+
+
+def transformValueWithMemoryData(inputValue) {
+
+  _retValue = Nil
+
+  if isNil(inputValue) == True {
+    _retValue = Nil
+  }
+  else if isString(inputValue) == True {
+
+    _inputString = inputValue
+    _pattern = "\\[\\*(\\w*)\\*\\]"
+
+    _allGroups = Regex.groups(_inputString, _pattern, 16)
+
+    for _group in _allGroups {
+      _pattern = cformat("\\[\\*%s\\*\\]",_group)
+      _replaceString = transformValueWithMemoryData(Globals.system.memory[_group])
+
+      _inputString = Regex.replace(_inputString, _pattern, stringify(_replaceString),16)
+    }
+
+    _retValue = _inputString
+
+  }
+  else if isNumber(inputValue) == True {
+    _retValue = inputValue
+  }
+  else if isArray(inputValue) == True {
+
+    _retValue = []
+
+    for _item in inputValue {
+      _retValue = _retValue :: transformValueWithMemoryData(_item)
+    }
+
+  }
+  else if isBool(inputValue) == True {
+    _retValue = inputValue
+  }
+  else if isDictionary(inputValue) == True {
+    _retValue = {}
+
+    for _key,_value in inputValue {
+      _retValue = _retValue + {_key : transformValueWithMemoryData(_value)}
+    }
+  }
+  else {
+    raise exception("TYPE_NOT_SUPPORTED")
+  }
+
+  return _retValue
+}
+
+def executeTestItems(testItemsArr,unit) {
+
+  for _testItem in testItemsArr {
+
+    if _testItem.plugin == "Rush" {
+
+      if _testItem.function == "launch_plugin" {
+        _functionPoint = Atlas.launch_plugin
+
+        _name = _testItem.parameters.name onError e -> if True {
+          _name = _testItem.parameters.plugin
+        }
+
+        if has_key(_testItem.parameters,"parameters") {
+          _parameters = [_testItem.parameters.bundle,_testItem.parameters.plugin,_name,_testItem.parameters.parameters]
+        }
+        else {
+          _parameters = [_testItem.parameters.bundle,_testItem.parameters.plugin,_name,_testItem.parameters]
+        }
+
+        if isNil(unit)==False {
+          _parameters = [unit] + _parameters
+        }
+
+      }
+      else {
+        _functionPoint = lookup(_testItem.function)
+        _parameters = [_testItem.parameters]
+      }
+    }
+    else {
+      _functionPoint = Atlas.call_plugin
+      _parameters = [_testItem.plugin,_testItem.function,_testItem.parameters]
+    }
+
+    _response = apply(_functionPoint,_parameters)
+  }
+
+}
+
+def createDutTopologyForStartButton(topology){
+    _stationTopology = Nil
+    if has_key(topology,"units")
+    {
+        _units =  getUnitsTopologyByStartButton(topology.units)
+        _stationTopology = {"units": _units}
+    }
+    elsif has_key(topology,"groups"){
+        _stationTopology = {"groups" : []}
+        for _group in topology.groups
+        {
+            _identifier = _group.identifier
+            _units = getUnitsTopologyByStartButton(_group.units)
+            _stationTopology.groups = _stationTopology.groups::{"identifier" : _identifier,"units": _units}
+        }
+
+    }
+    return _stationTopology
+}
+
+def getUnitsTopologyByStartButton(_units_topology)
+{
+    _units = []
+    for _dutName,_dutObj in _units_topology
+    {
+        if _dutObj.enable
+        {
+            _newUnit = {
+                "identifier" : Nil,
+                "unit_transports" : Nil,
+                "userinfo" : Nil
+            }
+            _newUnit.identifier = _dutName
+            _newUnit.unit_transports = [{"url" : cformat("uart://%s",_dutObj.unit_transports)}]
+            _newUnit.userinfo = _dutObj.userinfo
+            _newUnit.userinfo[_dutObj.device] = {"unit_transports" : _dutObj.unit_transports}
+            _units = _units::_newUnit
+        }
+    }
+    return _units
+}
+
+def createDutTopologyForEFIDutDetection(topology) {
+    _dut_topology = Nil
+    if has_key(topology,"units")
+    {
+        _dut_topology = {}
+        _dut_topology_setting = topology.units
+        for _dutName, _dutObj in _dut_topology_setting {
+            if _dutObj.enable
+            {
+                _newUnit = {
+                    "uartName" : Nil,
+                    "unitIdentifier" : Nil,
+                    "userinfo" : Nil
+                }
+                _newUnit.uartName = _dutObj.unit_transports
+                _newUnit.unitIdentifier = _dutName
+                _newUnit.userinfo = _dutObj.userinfo
+                _newUnit.userinfo[_dutObj.device] = {"unit_transports" : _dutObj.unit_transports}
+                _dut_topology = _dut_topology +  {_dutName : _newUnit}
+            }
+        }
+    }
+    Atlas.Log.info("_newUnit: ", _dut_topology)
+  return _dut_topology
+}
+
+def loopTestSetup(dicSetting)
+{
+    isListeningForUnitFinished = 1
+    isListeningForGroupFinished = 0
+    if has_key(dicSetting.topology,"groups"){
+        isListeningForUnitFinished = 0
+        isListeningForGroupFinished = 1
+    }
+    Atlas.launch_plugin("OpalQT","Repeat",{
+        "isListeningForUnitFinished" : isListeningForUnitFinished,
+        "isListeningForGroupFinished" : isListeningForGroupFinished,
+        "maxLoopCount" : dicSetting.maxLoopCount,
+        "delayTime" : 2
+     })
+    Atlas.call_app("show-banner", {"message" : "Station Under Loop Testing! Count="+stringify(dicSetting.maxLoopCount),
+                                 "bgColor" : "lightGrayColor"})
+}
+
+
+def loadFakeJSON(){
+    _contents = getFromJSON(Globals.system.simulatorResponsePath)
+    if _contents != Nil
+    {
+        Atlas.call_plugin("SystemMemory","storeIntoDictionary",{"key": "simulatorJsonInfo", "value": _contents})
+    }
+    return _contents
+}
+
+def loadGHStationJSON(){
+    _contents = getFromJSON(Globals.system.ghStationPath)
+    if _contents != Nil{
+        Atlas.call_plugin("SystemMemory","storeIntoDictionary",{"key": "ghJsonInfo", "value": _contents})
+    }
+    return _contents
+}
+
+def loadStationSetupJSON(){
+    _contents = getFromJSON(Globals.system.appSetupJSON)
+    if _contents != Nil{
+        Atlas.call_plugin("SystemMemory","storeIntoDictionary",{"key": "stationSetup", "value": _contents})
+    }
+    return _contents
+}
+
+############ function define for loading Main and Tech CSVs ###############
+def loadCSVs(mainData){
+    loadTechLimit()
+    testCoverage = loadMainCsv(mainData)
+    aryTechName = pickTechFromTestCoverage(testCoverage)
+    _testDataInfo = {}
+    for techName in aryTechName{
+        _testDataInfo = _testDataInfo+getTestDataFromTechCsv(techName)
+    }
+    Atlas.call_plugin("SystemMemory","storeIntoDictionary",{"key": "techCsvData", "value": _testDataInfo})
+    return _testDataInfo
+}
+
+def loadMainCsv(csvData) {
+    _lines = csvData
+    _testCoverage = []
+    softwareversion = Atlas.call_plugin("SystemMemory", "getObjectByKey",{"key": "ghJsonInfo"})["ghinfo"]["STATION_OVERLAY"]
+    softwareversion = Strings.tokenize(softwareversion, " ")[1]
+    Atlas.Log.info("Get the latest sw>>>>>>>>", softwareversion)
+    Atlas.call_plugin("SystemMemory","storeIntoDictionary",{"key": "saftwareVersion", "value": softwareversion})
+
+    for _line in _lines[2:]
+    {
+
+        if Strings.toupper(_line[0]) == "RUN_SITE_CSV"
+        {
+            siteCsvData = BasicCSV.load(Globals.system.sitePath) onError e-> if True
+            {
+                Atlas.Log.info("there is an exception for load site CSV", e)
+                siteCsvData = Nil
+            }
+            if siteCsvData != Nil and size(siteCsvData) > 0
+            {
+                _testCoverage = _testCoverage + loadSiteCsv(siteCsvData)
+                Atlas.Log.info("merge site csv DONE", _testCoverage)
+            }
+
+        }
+        else
+        {
+            _newTest = loadBySingleLine(_line)
+            _testCoverage = _testCoverage :: _newTest
+        }
+    }
+    Atlas.call_plugin("SystemMemory","storeIntoDictionary",{"key": "mainCsvData", "value": _testCoverage})
+    return _testCoverage
+}
+
+def loadSiteCsv(csvData)
+{
+    _lines = csvData
+    _testCoverageForSite = []
+    for _line in _lines[1:]{
+       _newTest = loadBySingleLine(_line)
+        _testCoverageForSite = _testCoverageForSite :: _newTest
+    }
+    Atlas.Log.info("return the site csv data is ", _testCoverageForSite, "is array: ", isArray(_testCoverageForSite))
+    return _testCoverageForSite
+}
+
+def loadBySingleLine(_line)
+{
+    _newTest = {
+            "testItem" : Nil,
+            "tech" : Nil,
+            "disable" : Nil,
+            "mp" : Nil,
+            "eng" : Nil,
+            "grr" : Nil,
+            "rel" : Nil
+        }
+
+    _newTest.testItem = _line[0]
+
+    _newTest.tech = _line[1]
+
+    _newTest.disable = False
+    _line[2] = Strings.tolower(stringify(_line[2]))
+    if _line[2]=="1" or _line[2]=="true" or _line[2]=="yes" {
+        _newTest.disable = True
+    }
+    _newTest.mp = False
+    _line[3] = Strings.tolower(stringify(_line[3]))
+    if _line[3]=="1" or _line[3]=="true" or _line[3]=="yes" {
+        _newTest.mp = True
+    }
+    _newTest.eng = False
+    _line[4] = Strings.tolower(stringify(_line[4]))
+    if _line[4]=="1" or _line[4]=="true" or _line[4]=="yes" {
+        _newTest.eng = True
+    }
+    _newTest.grr = False
+    _line[5] = Strings.tolower(stringify(_line[5]))
+    if _line[5]=="1" or _line[5]=="true" or _line[5]=="yes" {
+        _newTest.grr = True
+    }
+    _newTest.rel = False
+    _line[6] = Strings.tolower(stringify(_line[6]))
+    if _line[6]=="1" or _line[6]=="true" or _line[6]=="yes" {
+        _newTest.rel = True
+    }
+
+    return _newTest
+}
+
+def loadTechLimit() {
+
+  _all_limits = {}
+
+  _lines = BasicCSV.load(Globals.system.limitPath)
+
+  _header_row = _lines[0]
+  _content_rows = _lines[1:]
+
+  for _row in _content_rows {
+
+    _newlimit = {
+      # "group" : Nil
+      # "name" : Nil
+      # "units" : Nil
+      # "upperLimit" : Nil
+      # "lowerLimit" : Nil
+      # "relaxedUpperLimit" : Nil
+      # "relaxedLowerLimit" : Nil
+      # "pattern" : Nil
+      # "testConditionFlag" : Nil
+      # "testCondition" : Nil
+      # "commands" : Nil
+    }
+
+    for i in range(_header_row) {
+      if isNil(_row[i])==False {
+        _newlimit[_header_row[i]] = _row[i]
+      }
+    }
+
+    _all_limits[_newlimit.name] = _newlimit
+  }
+  Atlas.call_plugin("SystemMemory","storeIntoDictionary",{"key": "techLimits", "value": _all_limits})
+  return _all_limits
+
+}
+
+def pickTechFromTestCoverage(testCoverage){
+    aryTechName = []
+    for line in testCoverage{
+        if (contains(aryTechName , line.tech) == False){
+            aryTechName = aryTechName :: line.tech
+        }
+    }
+    Atlas.Log.info("pickTechFromTestCoverage",aryTechName)
+    return aryTechName
+}
+def getTestDataFromTechCsv(techName) {
+    _testDataInfo = {}
+    _testDataInfo[techName] = {}
+
+    _TECH_CSV_FILE_URL = Globals.system.csvRoot+"/"+techName+".csv"
+    _csvLines = BasicCSV.load(_TECH_CSV_FILE_URL)
+
+    for _line in _csvLines[1:] {
+        _testItemData = {
+            "techName" : Nil,
+            "testName" : Nil,
+            "testAction" : Nil,
+            "plugin" : Nil,
+            "function" : Nil,
+            "parameter" : Nil,
+            "command" : Nil,
+            "stopOnError" : Nil
+        }
+        _testItemData.techName = techName
+
+        _testItemData.testName = _line[0]
+
+        _testItemData.testAction = _line[1]
+
+        _testItemData.parameter = _line[2]
+
+        _testItemData.parameter = JSON_LoadFromString(_testItemData.parameter) onError e -> if True {
+            UI_ShowMessage(_testItemData.testName)
+            UI_ShowMessage(_testItemData.parameter)
+        }
+        _testItemData.command = _line[3]
+        _testItemData.stopOnError = _line[4]
+        _tokens = tokenize(_testItemData.testAction,":")
+        _testItemData.plugin = _tokens[0]
+        _testItemData.function = _tokens[1]
+
+        if _testItemData.testName==Nil {
+            _testItemData.testName = _previousTestName
+        }
+        else {
+            _testDataInfo[techName][_testItemData.testName] = []
+            _previousTestName = _testItemData.testName
+        }
+
+        _testDataInfo[techName][_testItemData.testName] = _testDataInfo[techName][_testItemData.testName]:: _testItemData
+    }
+    return _testDataInfo
+}
+
+############ function define for base using###############
+def getFromJSON(url){
+    _contents = {}
+    _contents = JSON.load(url) onError e-> if True{
+        Atlas.Log.error("Can not load JSON file from url"+url)
+    }
+    return _contents
+}
+
+def UI_ShowMessage(msg){
+    msg = stringify(msg)
+    Atlas.call_app("show-form", { "type" : "message", "message" : msg})
+}
+
+def JSON_LoadFromString(string){
+    if isNil(string) {
+        emptyDict = {}
+        return emptyDict
+    }
+    return JSON.parse(string)
+}
+
+def contains(arr,value){
+    bContains = False
+    for item in arr {
+        if (item == value) {
+            bContains = True
+            break
+        }
+    }
+    return bContains
+}
+
+def updateValueByStationInfo(inputValue) {
+
+  _retValue = Nil
+
+  if isNil(inputValue) == True {
+    _retValue = Nil
+  }
+  else if isString(inputValue) == True {
+
+    _inputString = inputValue
+    _pattern = "(\\w*\\.\\w*)\\(\\)"
+
+    _allGroups = Regex.groups(_inputString, _pattern, 16)
+
+    for _group in _allGroups {
+      _pattern = cformat("%s\\(\\)",_group)
+      _pfunc = lookup(_group)
+      _replaceString = apply(_pfunc,[])
+
+      _inputString = Regex.replace(_inputString, _pattern, stringify(_replaceString),16)
+    }
+
+    _retValue = _inputString
+
+  }
+  else if isNumber(inputValue) == True {
+    _retValue = inputValue
+  }
+  else if isArray(inputValue) == True {
+
+    _retValue = []
+
+    for _item in inputValue {
+      _retValue = _retValue :: updateValueByStationInfo(_item)
+    }
+
+  }
+  else if isBool(inputValue) == True {
+    _retValue = inputValue
+  }
+  else if isDictionary(inputValue) == True {
+    _retValue = {}
+
+    for _key,_value in inputValue {
+      _retValue = _retValue + {_key : updateValueByStationInfo(_value)}
+    }
+  }
+  else {
+    raise exception("TYPE_NOT_SUPPORTED")
+  }
+
+  return _retValue
+}
+
+############ function define for others###############
+def deletedPreviousLog(){
+    files = System.ls("/vault/Atlas")
+    Atlas.Log.info("files:" ,files)
+    for file in files{
+        a = Regex.matches(file, "atlas.log", 0)
+        if (a != Nil){
+            file = "/vault/Atlas/" + stringify(file)
+            rc = System.system("rm "+ file)
+            if (rc == True){
+                Atlas.Log.info("already remove "+stringify(file))
+            }else{
+                Atlas.Log.info("remove "+stringify(file)+" unsuccessfully")
+            }
+        }
+    }
+}
