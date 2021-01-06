@@ -1,12 +1,10 @@
-
 def main() {
   initializeSystemValuables()
   Globals.stationStartTime = System.now()
   summaryStartTime = System.timestring("%Y/%m/%d %H:%M:%S")
 
   _testCoverage = loadMainCsv()
-  # Atlas.Log.info("_testCoverage: ", stringify(_testCoverage))
-  Globals.system.limits["Limits"] = Globals.system.techLimits #old school
+  Globals.system.limits[“Limits”] = Globals.system.techLimits #old school
 
   for index in range(0,size(_testCoverage)) {
     itemStartTime  = System.now()
@@ -18,6 +16,7 @@ def main() {
     #   renameLogs()
     # }
     Globals.system.stopOnErrorFlag = 0
+    Globals.system.retryTimes = 0
     _skipThisTest = False
     Globals.system.memory.record = {}
     Globals.system.testReocrdsOfCurrentTestItem = []
@@ -56,11 +55,11 @@ def main() {
     atlasLogInfo(strTitle)
 
     # loadStart = System.now()
+    #拿到tech.csv中，TESTITEM所有的参数。
     _testDataInfoArr = getTestDataFromTechCsv_V2(_test.testItem,_test.tech)
     # atlasLogInfo("end test item at getTestDataFromTechCsv : ",System.now()-loadStart)
 
     _testNameOnGUI = cformat("%d. %s",index+1,_test.testItem)
-
     if _test.testItem=="test_setup" or _test.testItem=="test_teardown" {
       _functionPoint = executeTestItems
       _parameters = [_testDataInfoArr,Nil]
@@ -70,7 +69,6 @@ def main() {
       _functionPoint = Atlas.execute_test
       _parameters = [_testNameOnGUI,executeTestItems,_testDataInfoArr,Nil]
     }
-
     # Atlas.execute_test(_testNameOnGUI,executeTestItems,_testDataInfoArr,Nil) onError e -> if True {
 
     singleItemResult= apply(_functionPoint,_parameters) onError e -> if True {
@@ -82,9 +80,7 @@ def main() {
       }
     }
 
-
     Globals.system.bFinalResult   = Globals.system.bFinalResult and singleItemResult
-
     if (singleItemResult == False and Globals.system.stopOnErrorFlag > 0){
       for skipIndex in range(index+1 , size(_testCoverage)-Globals.system.stopOnErrorFlag){
         Globals.system.skipTestList = Globals.system.skipTestList :: _testCoverage[skipIndex]["testItem"]
@@ -92,7 +88,7 @@ def main() {
       atlasLogInfo("stopOnErrorFlag: ",Globals.system.stopOnErrorFlag,"skip list :",Globals.system.skipTestList)
     }
     atlasLogInfo(formatString("=","End Test:"+_test.testItem+stringify(singleItemResult)))
-    atlasLogInfo("testReocrdsOfCurrentTestItem: ", stringify(Globals.system.testReocrdsOfCurrentTestItem))
+
     #write CSV and uart log here when one item finished
     hasWrittenToCSVLog = False
     costTime = System.now()-itemStartTime
@@ -256,9 +252,7 @@ def executeTestItems(testItemsArr,unit) {
       atlasLogInfo("Skip Test This Sub Item")
       continue
     }
-
     _testItem = interpolateParameter(_testItem)
-
     if _testItem.plugin == "Rush" {
       if _testItem.function == "launch_plugin" {
         _functionPoint = Atlas.launch_plugin
@@ -282,6 +276,7 @@ def executeTestItems(testItemsArr,unit) {
       else {
         _functionPoint = lookup(_testItem.function)
         _parameters = [_testItem.parameter]
+        _Secondparameters = _parameters
       }
     }
     else if size(Regex.matches(_testItem.plugin,"Atlas",1))>0{
@@ -328,71 +323,70 @@ def executeTestItems(testItemsArr,unit) {
     {
       simulator = True
     }
-
     _response = {
       "result" : True,
       "output" : {}
     }
 
-    # retryCount = 0
-  
-    # retryCount = numerify(_testItem.parameter.retry) onError e -> if True {
-    #   retryCount = 0
-    # }
-
-    # currentCount = 0
-    # while (currentCount <= retryCount)
-    # {
-      if _testItem.plugin == "Dut" and simulator != False
+    if _testItem.plugin == "Dut" and simulator != False
+    {
+      item_response = Atlas.call_plugin("SystemMemory","getObjectByKey",{"key": "simulatorJsonInfo"})[_testItem.testName]
+      commands = item_response['command']
+      responses = item_response['response']
+      for index in range(0, size(commands))
       {
-        item_response = Atlas.call_plugin("SystemMemory","getObjectByKey",{"key": "simulatorJsonInfo"})[_testItem.testName]
-        commands = item_response['command']
-        responses = item_response['response']
-        for index in range(0, size(commands))
+        if _testItem.command == commands[index]
         {
-          if _testItem.command == commands[index]
-          {
-            _SimResponse = responses[index]
-            atlasLogInfo('command',_testItem.command, "response", _SimResponse, "output", _testItem.parameter.output)
-            digestTestResponse(_testItem, _SimResponse)
-            removeObject(commands, commands[index])
-            removeObject(responses, responses[index])
-            _response.result = True
-          }
+          _SimResponse = responses[index]
+          atlasLogInfo('command',_testItem.command, "response", _SimResponse, "output", _testItem.parameter.output)
+          digestTestResponse(_testItem, _SimResponse)
+          removeObject(commands, commands[index])
+          removeObject(responses, responses[index])
+          _response.result = True
         }
       }
-      else
-      {
-        _response = apply(_functionPoint,_parameters) onError e-> if True{
-  
-          if e.message=="Dut.sendCommand failed" {
-            Globals.system.Dut.timeoutToleranceCount = Globals.system.Dut.timeoutToleranceCount - 1
-  
-            if Globals.system.Dut.timeoutToleranceCount<=0 {
-              atlasLogInfo("Dut.timeoutToleranceCount equals to 0. Dut might be panic. Set all defaultTimeout to 0.")
-              Globals.system.Dut.defaultTimeout = 0
-              Globals.system.Dut.defaultSmokeyTimeout = 0
+    }
+    else
+    {
+      _response = apply(_functionPoint,_parameters) onError e-> if True{
+        if e.message=="Dut.sendCommand failed" {
+          Globals.system.Dut.timeoutToleranceCount = Globals.system.Dut.timeoutToleranceCount - 1
+
+          if Globals.system.Dut.timeoutToleranceCount<=0 {
+            atlasLogInfo("Dut.timeoutToleranceCount equals to 0. Dut might be panic. Set all defaultTimeout to 0.")
+            Globals.system.Dut.defaultTimeout = 0
+            Globals.system.Dut.defaultSmokeyTimeout = 0
+          }
+          # Atlas.call_plugin("Dut","syncCmdResp")
+        }
+
+        atlasLogInfo("Function raise exception Error here,","error info:",e,"_response:",_response,"_functionPoint:", _functionPoint,"_parameters:",_parameters)
+        _response.result = False
+      }
+      if(not _response.result and Globals.system.retryTimes>0){
+          for index in range(0,Globals.system.retryTimes-1){
+              _response = apply(_functionPoint,_Secondparameters) onError e-> if True{
+              if e.message=="Dut.sendCommand failed" {
+                Globals.system.Dut.timeoutToleranceCount = Globals.system.Dut.timeoutToleranceCount - 1
+
+              if Globals.system.Dut.timeoutToleranceCount<=0 {
+                atlasLogInfo("Dut.timeoutToleranceCount equals to 0. Dut might be panic. Set all defaultTimeout to 0.")
+                Globals.system.Dut.defaultTimeout = 0
+                Globals.system.Dut.defaultSmokeyTimeout = 0
+              }
+          # Atlas.call_plugin("Dut","syncCmdResp")
+        }
+        atlasLogInfo("Function raise exception Error here,","error info:",e,"_response:",_response,"_functionPoint:", _functionPoint,"_parameters:",_parameters)
+        _response.result = False
+        }
+          if(_response.result==True){
+              break
             }
-            # Atlas.call_plugin("Dut","syncCmdResp")
-          }
-  
-          atlasLogInfo("Function raise exception Error here,","error info:",e,"_response:",_response,"_functionPoint:", _functionPoint,"_parameters:",_parameters)
-          _response.result = False
+            System.sleep(3)
         }
-  
-        digestTestResponse(_testItem,_response)
-
       }
-
-    #   if (_response.result)
-    #   {
-    #     break
-    #   }
-
-    #   currentCount = currentCount + 1;
-    # }
-      
-
+      digestTestResponse(_testItem,_response)
+    }
 
     bPreSubItemResult = _response.result onError e -> if True{
       if isBool(_response){
@@ -522,8 +516,14 @@ def interpolateParameter(testItem) {
   testItem.parameter.stopOnError = testItem.stopOnError onError e -> if True {
     testItem.parameter.stopOnError = Nil
   }
+  testItem.parameter.retryTimes = testItem.retryTimes onError e -> if True {
+    testItem.parameter.retryTimes = Nil
+  }
   if (isNil(testItem.parameter.stopOnError) == False){
     Globals.system.stopOnErrorFlag = numerify(testItem.parameter.stopOnError)
+  }
+  if (isNil(testItem.parameter.retryTimes) == False){
+    Globals.system.retryTimes = numerify(testItem.parameter.retryTimes)
   }
   testItem.parameter.techName = testItem.techName
   testItem.parameter.testName = testItem.testName
@@ -581,7 +581,7 @@ def digestTestResponse(testItem,response) {
   }else{
       atlasLogInfo("digestTestResponse>>>",response)
   }
-  if testItem.function == "sendCommand" or testItem.function == "read" or testItem.function == "readResponse" or Strings.location_of_substring(testItem.plugin,"Fixture") !=Nil {
+  if testItem.function == "sendCommand" or testItem.function == "read" or Strings.location_of_substring(testItem.plugin,"Fixture") !=Nil {
     atlasLogInfo('output', testItem.parameter.output[0])
     Globals.system.memory = Globals.system.memory + {testItem.parameter.output[0] : response}
 
@@ -646,6 +646,7 @@ def initializeSystemValuables() {
 
   ghJsonInfo = Atlas.call_plugin("SystemMemory","getObjectByKey",{"key": "ghJsonInfo"})
   Globals.system.memory = Globals.system.memory + ghJsonInfo
+
   # atlasLogInfo("Globals.system.memory:", Globals.system.memory)
   Globals.system.serialnumber = ""
 
@@ -659,7 +660,7 @@ def initializeSystemValuables() {
   Globals.system.skipTestCount = 0
   Globals.system.skipTestList = []
   Globals.system.stopOnErrorFlag = 0
-
+  Globals.system.retryTimes = 0
   Globals.system.Dut = {}
   Globals.system.Dut.defaultTimeout = 30
   Globals.system.Dut.defaultSmokeyTimeout = 60
@@ -703,21 +704,9 @@ def initializeSystemValuables() {
   Globals.system.csvlog.info = ""
   Globals.system.csvlog.path = Atlas.Unit.working_dir+"/AtlasLogs/"+Atlas.Unit.unit_identifier+".csv"
 
-  if (Globals.system.memory.stationType == "IQC-CAP")
-  {
-    filePath = cformat("%s/Documents/Atlas/MeterOffsetConfig.json",System.getenv("HOME"))
-    _OffsetConfig = JSON.load(filePath)
-    if (_OffsetConfig != Nil)
-    {
-      Globals.system.offSet = _OffsetConfig.Offset
-      Atlas.Log.info("********** Globals.system.offSet: ",Globals.system.offSet)
-    }
-  }
-
   writeCSVLog("TestName,Status,Value,DownLimit,UpLimit,Unit,TestTime,FailedSubItem\n")
 }
 def getTestDataFromTechCsv_V2(testName,techName) {
-
   testItem_data = Globals.system.techCsvInfo[techName][testName]
   # atlasLogInfo('transformValueWithMemoryData0 is ', testItem_data)
   for i in range(0,size(testItem_data)){
